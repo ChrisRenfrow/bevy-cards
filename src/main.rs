@@ -20,46 +20,140 @@ impl Plugin for CameraPlugin {
     }
 }
 
-#[derive(Debug, Component)]
+#[derive(Component)]
 struct Card;
+
+const CARD_SIZE: (f32, f32) = (40., 60.);
 
 fn add_cards(
     mut cmd: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    asset_server: Res<AssetServer>,
+    _asset_server: Res<AssetServer>,
 ) {
     cmd.spawn((
         MaterialMesh2dBundle {
             mesh: meshes
-                .add(Mesh::from(shape::Quad::new(Vec2 { x: 40., y: 60. })))
+                .add(Mesh::from(shape::Quad::new(Vec2 {
+                    x: CARD_SIZE.0,
+                    y: CARD_SIZE.1,
+                })))
                 .into(),
-            material: materials.add(ColorMaterial::from(Color::WHITE)),
-            transform: Transform::from_xyz(0., 0., 0.),
+            material: materials.add(ColorMaterial::from(Color::GRAY)),
+            transform: Transform::from_xyz(-CARD_SIZE.0 - 2., 0., 0.),
             ..default()
         },
         Card,
+        // Draggable,
+        // Hoverable,
+    ));
+    cmd.spawn((
+        MaterialMesh2dBundle {
+            mesh: meshes
+                .add(Mesh::from(shape::Quad::new(Vec2 {
+                    x: CARD_SIZE.0,
+                    y: CARD_SIZE.1,
+                })))
+                .into(),
+            material: materials.add(ColorMaterial::from(Color::WHITE)),
+            transform: Transform::from_xyz(CARD_SIZE.0 + 2., 0., 0.),
+            ..default()
+        },
+        Card,
+        Draggable,
+        Hoverable,
     ));
 }
 
-fn move_cards(
-    time: Res<Time>,
-    mut q_card: Query<(&mut Transform, &Card)>,
-    q_win: Query<&Window, With<PrimaryWindow>>,
-    q_cam: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+// https://stackoverflow.com/questions/65396065/what-is-an-acceptable-approach-to-dragging-sprites-with-bevy-0-4
+/// The player's cursor/pointer world position
+#[derive(Default, Resource)]
+struct Pointer {
+    position: Vec2,
+}
+/// Whether an entity is draggable
+#[derive(Component)]
+struct Draggable;
+/// When an entity is being dragged
+#[derive(Component)]
+struct Dragged;
+
+/// Whether an entity is hover-able
+#[derive(Component)]
+struct Hoverable;
+/// When the pointer is hovering above the entity
+#[derive(Component)]
+struct Hovered;
+
+fn update_pointer(
+    mut pointer: ResMut<Pointer>,
+    q_window: Query<&Window, With<PrimaryWindow>>,
+    q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
 ) {
-    let (cam, cam_transform) = q_cam.single();
-    let window = q_win.single();
-    if let Some(world_pos) = window
+    let (camera, camera_transform) = q_camera.single();
+    let window = q_window.single();
+
+    if let Some(world_position) = window
         .cursor_position()
-        .and_then(|cursor| cam.viewport_to_world(cam_transform, cursor))
+        .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
         .map(|ray| ray.origin.truncate())
     {
-        for (mut card_transform, _) in &mut q_card {
-            card_transform.translation.y = world_pos.y;
-            card_transform.translation.x = world_pos.x;
+        pointer.position = world_position;
+    }
+}
+
+fn hoverable(
+    mut commands: Commands,
+    pointer: Res<Pointer>,
+    q_hoverable: Query<(Entity, &Transform), (With<Hoverable>, Without<Dragged>)>,
+) {
+    for (entity, transform) in q_hoverable.iter() {
+        let half_width = CARD_SIZE.0 / 2.;
+        let half_height = CARD_SIZE.1 / 2.;
+
+        if transform.translation.x - half_width < pointer.position.x
+            && transform.translation.x + half_width > pointer.position.x
+            && transform.translation.y - half_height < pointer.position.y
+            && transform.translation.y + half_height > pointer.position.y
+        {
+            eprintln!("Hovering entity: {:?}", entity);
+            commands.entity(entity).insert(Hovered);
+        } else {
+            eprintln!("Stopped hovering entity: {:?}", entity);
+            commands.entity(entity).remove::<Hovered>();
         }
     }
+}
+
+fn draggable(
+    mut commands: Commands,
+    mouse_input: Res<Input<MouseButton>>,
+    q_draggable: Query<Entity, (With<Hovered>, With<Draggable>)>,
+    q_dragged: Query<Entity, With<Dragged>>,
+) {
+    if mouse_input.just_pressed(MouseButton::Left) {
+        if let Some(entity) = q_draggable.iter().next() {
+            eprintln!("Dragging entity: {:?}", entity);
+            commands.entity(entity).insert(Dragged);
+        }
+    }
+    if mouse_input.just_released(MouseButton::Left) {
+        for entity in q_dragged.iter() {
+            eprintln!("Dropping entity: {:?}", entity);
+            commands.entity(entity).remove::<Dragged>();
+        }
+    }
+}
+
+fn dragged(mut q_dragged: Query<(Entity, &mut Transform), With<Dragged>>, pointer: Res<Pointer>) {
+    for (_, mut transform) in q_dragged.iter_mut() {
+        transform.translation.x = pointer.position.x;
+        transform.translation.y = pointer.position.y;
+    }
+}
+
+fn setup(mut commands: Commands) {
+    commands.init_resource::<Pointer>();
 }
 
 fn main() {
@@ -72,7 +166,10 @@ fn main() {
             ..default()
         }))
         .add_plugins(CameraPlugin)
-        .add_systems(Startup, add_cards)
-        .add_systems(Update, (close_on_esc, move_cards))
+        .add_systems(Startup, (setup, add_cards))
+        .add_systems(
+            Update,
+            (close_on_esc, update_pointer, hoverable, draggable, dragged),
+        )
         .run();
 }
